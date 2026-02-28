@@ -4,7 +4,7 @@ import { ElevenLabsClient } from "elevenlabs";
 
 // Voice pool: narrator + up to 5 character slots + overflow
 const VOICE_POOL: Record<string, { id: string; name: string }> = {
-  narrator: { id: "pNInz6obpgDQGcFmaJgB", name: "Adam" },
+  narrator: { id: "JBFqnCBsd6RMkjVDRZzb", name: "George" },
   slot0: { id: "21m00Tcm4TlvDq8ikWAM", name: "Rachel" },
   slot1: { id: "ErXwobaYiN019PkySvjV", name: "Antoni" },
   slot2: { id: "MF3mGyEYCl7XYWbV9V6O", name: "Elli" },
