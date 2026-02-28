@@ -184,16 +184,23 @@ ${text.slice(0, 1500)}`;
         : `${idx} [dialogue - ${seg.speaker ?? "unknown"}]: "${seg.text.slice(0, 150)}"`
     ).join("\n");
 
-    const sfxGeminiPrompt = `You are a foley sound designer for an immersive audiobook. For each narration segment, suggest a SHORT (2-5 word) background or foley sound effect prompt — things you would HEAR in the physical environment, not descriptions of voices or music.
+    const sfxGeminiPrompt = `You are a sound designer writing prompts for an AI sound effects generator (ElevenLabs). Your prompts must describe the ACOUSTIC CHARACTER of the sound — its scale, texture, and environment — not just label the action. The generator responds well to vivid, sensory descriptions.
 
-GOOD examples: "crackling fireplace", "door creaking open", "teacup rattling saucer", "rain on window glass", "footsteps on wooden floor", "wind through trees"
-BAD — return null for these categories:
-- Anything describing a voice or speech (e.g. "voice speaking softly", "man shouting", "woman whispering")
-- Silence, pauses, or absence of sound (e.g. "silent pause", "quiet moment")
-- Music (e.g. "music fading", "dramatic sting")
-- Abstract emotions or atmosphere with no physical source (e.g. "tense atmosphere", "dramatic moment")
+GOOD prompts (evocative, acoustic):
+- "thunderous crowd applause filling a large hall" (not "clapping hands")
+- "roaring fireplace with crackling wood pops" (not "fire burning")
+- "heavy oak door slamming shut with echo" (not "door closing")
+- "torrential rain hammering a tin roof" (not "rain outside")
+- "footsteps crunching on gravel path" (not "someone walking")
+- "teacup clinking against china saucer" (not "cup sound")
 
-Only suggest sound if there is a concrete physical object or environment present. Return null otherwise.
+BAD — return null for:
+- Voices, speech, or any human vocal sound
+- Silence or absence of sound
+- Music or melodic elements
+- Abstract emotions with no physical sound source
+
+For each narration segment, write a 4-10 word evocative sound prompt if a physical sound is present, or null if not. Be specific about scale and environment.
 Reply ONLY with a valid JSON array, no markdown. Format: [{"segmentIndex":<number>,"prompt":<string|null>}]
 
 Segments:
@@ -287,7 +294,7 @@ ${fullPassage}`;
     if (nonNullSfx.length > 0) {
       const results = await Promise.allSettled(nonNullSfx.map(async ({ segmentIndex, prompt }) => {
         console.log(`[SFX] generating → segment ${segmentIndex} | prompt: "${prompt}" | duration: 3s | prompt_influence: 0.3`);
-        const sfxStream = await elClient.textToSoundEffects.convert({ text: prompt, duration_seconds: 3, prompt_influence: 0.3 });
+        const sfxStream = await elClient.textToSoundEffects.convert({ text: prompt, duration_seconds: 5, prompt_influence: 0.5 });
         const sfxBuffer = await streamToBuffer(sfxStream as AsyncIterable<Buffer>);
         const timing = segmentTimings.find(t => t.segmentIndex === segmentIndex)!;
         console.log(`[SFX] done → segment ${segmentIndex} | startTime: ${timing.startTime.toFixed(2)}s | bytes: ${sfxBuffer.length}`);
