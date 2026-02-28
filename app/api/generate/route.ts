@@ -34,6 +34,23 @@ interface VoiceAssignment {
   description: string;
 }
 
+// Run async tasks with bounded concurrency
+async function runWithConcurrency<T>(
+  tasks: Array<() => Promise<T | null>>,
+  concurrency: number
+): Promise<Array<T | null>> {
+  const results: Array<T | null> = new Array(tasks.length).fill(null);
+  let next = 0;
+  async function worker() {
+    while (next < tasks.length) {
+      const i = next++;
+      results[i] = await tasks[i]();
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, worker));
+  return results;
+}
+
 async function streamToBuffer(stream: AsyncIterable<Buffer>): Promise<Buffer> {
   const chunks: Buffer[] = [];
   for await (const chunk of stream) chunks.push(chunk);
@@ -267,37 +284,48 @@ ${text.slice(0, 1500)}`;
 
     // ── Step 3: Three parallel Gemini calls ──────────────────────────────────
 
-    // a. Storyboard image generation — one per scene, all in parallel
+    // a. Storyboard image generation — one per scene, concurrency-limited to avoid rate limits
     const IMAGE_MODEL = "gemini-2.5-flash-image";
-    const imagePromises = scenes.map(async (scene): Promise<StoryboardFrame | null> => {
+    const imageTasks = scenes.map((scene) => async (): Promise<StoryboardFrame | null> => {
       const prompt =
         `Film storyboard panel. Hand-drawn rough black marker sketch on white paper. ` +
         `Bold thick lines, gestural style, black and white only, no color, ` +
         `like a professional director's storyboard. ` +
         `Scene: ${scene.heading}. ${scene.action.slice(0, 200)}`;
-      try {
-        const imageResult = await genai.models.generateContent({
-          model: IMAGE_MODEL,
-          contents: [{ role: "user", parts: [{ text: prompt }] }],
-          config: { responseModalities: ["TEXT", "IMAGE"], imageConfig: { aspectRatio: "16:9" } },
-        });
-        const candidates = imageResult.candidates ?? [];
-        console.log(`[IMAGE] Scene ${scene.index}: ${candidates.length} candidate(s)`);
-        for (const cand of candidates) {
-          for (const part of cand.content?.parts ?? []) {
-            if (part.inlineData?.data) {
-              console.log(`[IMAGE] Scene ${scene.index} OK: ${part.inlineData.mimeType}, ${part.inlineData.data.length} chars`);
-              return { sceneIndex: scene.index, imageBase64: part.inlineData.data, mimeType: part.inlineData.mimeType ?? "image/png" };
+
+      for (let attempt = 0; attempt <= 2; attempt++) {
+        if (attempt > 0) {
+          const delay = attempt * 6000;
+          console.warn(`[IMAGE] Scene ${scene.index}: retrying in ${delay / 1000}s (attempt ${attempt + 1})`);
+          await new Promise(r => setTimeout(r, delay));
+        }
+        try {
+          const imageResult = await genai.models.generateContent({
+            model: IMAGE_MODEL,
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            config: { responseModalities: ["TEXT", "IMAGE"], imageConfig: { aspectRatio: "16:9" } },
+          });
+          const candidates = imageResult.candidates ?? [];
+          console.log(`[IMAGE] Scene ${scene.index}: ${candidates.length} candidate(s)`);
+          for (const cand of candidates) {
+            for (const part of cand.content?.parts ?? []) {
+              if (part.inlineData?.data) {
+                console.log(`[IMAGE] Scene ${scene.index} OK: ${part.inlineData.mimeType}, ${part.inlineData.data.length} chars`);
+                return { sceneIndex: scene.index, imageBase64: part.inlineData.data, mimeType: part.inlineData.mimeType ?? "image/png" };
+              }
             }
           }
+          console.warn(`[IMAGE] Scene ${scene.index}: no inlineData in response`);
+          return null; // no image returned — don't retry
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          const isRateLimit = msg.includes("429") || msg.includes("RESOURCE_EXHAUSTED") || msg.includes("quota");
+          if (isRateLimit && attempt < 2) continue;
+          console.error(`[IMAGE] Scene ${scene.index} failed (attempt ${attempt + 1}):`, e);
+          return null;
         }
-        // Log full response for debugging when no image found
-        console.warn(`[IMAGE] Scene ${scene.index}: no inlineData found. Full response:`, JSON.stringify(imageResult, null, 2).slice(0, 1000));
-        return null;
-      } catch (e) {
-        console.error(`[IMAGE] Scene ${scene.index} exception (model: ${IMAGE_MODEL}):`, e);
-        return null;
       }
+      return null;
     });
 
     // b. SFX suggestions per scene
@@ -365,14 +393,14 @@ Scenes:
 ${scenes.map(s => `${s.index}: "${s.heading}" — ${s.action.slice(0, 180)}`).join("\n")}`;
 
     const [imageResults, sfxRawResult, toneRawResult, ambianceRawResult] = await Promise.allSettled([
-      Promise.all(imagePromises),
+      runWithConcurrency(imageTasks, 3),
       genai.models.generateContent({ model: "gemini-2.5-flash", contents: [{ role: "user", parts: [{ text: sfxGeminiPrompt }] }] }),
       genai.models.generateContent({ model: "gemini-2.5-flash", contents: [{ role: "user", parts: [{ text: toneGeminiPrompt }] }] }),
       genai.models.generateContent({ model: "gemini-2.5-flash", contents: [{ role: "user", parts: [{ text: ambianceGeminiPrompt }] }] }),
     ]);
 
     const storyboardFrames: StoryboardFrame[] = imageResults.status === "fulfilled"
-      ? imageResults.value.filter((f): f is StoryboardFrame => f !== null)
+      ? imageResults.value.filter((f): f is StoryboardFrame => f !== null && f !== undefined)
       : [];
 
     let sfxSuggestions: SfxSuggestion[] = [];
