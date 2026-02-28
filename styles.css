@@ -263,19 +263,11 @@ a {
   background: rgba(255, 216, 154, 0.55);
 }
 
-h1 {
-  position: relative;
-  z-index: 1;
-  margin-top: var(--space-16);
-  font-size: clamp(2.4rem, 7vw, 3.9rem);
-  line-height: 1.05;
-  max-width: 14ch;
-}
-
+h1,
 .hero-carousel-row {
   position: relative;
   z-index: 1;
-  margin-top: 0.45rem;
+  margin-top: var(--space-16);
   margin-bottom: 0;
   font-family: "Sora", sans-serif;
   color: var(--ink);
@@ -284,14 +276,12 @@ h1 {
   max-width: 14ch;
 }
 
-.hero-wheel-row {
-  position: relative;
-  z-index: 1;
-  margin-top: 0.35rem;
-  margin-bottom: 0;
-  font-size: clamp(2.4rem, 7vw, 3.9rem);
-  line-height: 1.05;
-  min-height: 1.1em;
+.hero-carousel-row {
+  margin-top: 0.45rem;
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  flex-wrap: wrap;
 }
 
 .hero-wheel-window {
@@ -300,7 +290,7 @@ h1 {
   align-items: baseline;
   height: 1.1em;
   overflow: hidden;
-  min-width: 10ch;
+  min-width: 7.8ch;
 }
 
 .hero-wheel-text {
