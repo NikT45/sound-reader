@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { GoogleGenAI, type LiveMusicSession } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 import { ElevenLabsClient } from "elevenlabs";
+import WebSocket from "ws";
 
 interface ScriptScene {
   index: number;
@@ -77,9 +78,10 @@ function pcmToWav(pcm: Buffer, channels: number, sampleRate: number): Buffer {
   return Buffer.concat([header, pcm]);
 }
 
-// Collect `durationSeconds` of Lyria PCM audio and return as WAV base64
+// Collect `durationSeconds` of Lyria PCM audio and return as WAV base64.
+// Bypasses the SDK's live.music.connect() which generates a double-slash URL (SDK bug).
 async function generateLyriaMusic(
-  genai: GoogleGenAI,
+  apiKey: string,
   musicPrompt: string,
   durationSeconds: number
 ): Promise<string | null> {
@@ -88,52 +90,61 @@ async function generateLyriaMusic(
   // PCM16 stereo 48 kHz → 4 bytes per frame
   const targetBytes = Math.ceil(Math.min(durationSeconds, 25) * 48000 * 4);
 
+  const WS_URL =
+    `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateMusic?key=${apiKey}`;
+
   return new Promise<string | null>((resolve) => {
-    let session: LiveMusicSession;
     let finished = false;
 
     const finish = () => {
       if (finished) return;
       finished = true;
-      try { session?.close(); } catch {}
+      try { ws.close(); } catch {}
       if (!chunks.length) { resolve(null); return; }
       const pcm = Buffer.concat(chunks);
       resolve(pcmToWav(pcm, 2, 48000).toString("base64"));
     };
 
-    const timer = setTimeout(finish, 40_000);
+    const timer = setTimeout(() => {
+      console.warn("[LYRIA] timeout — using collected audio");
+      finish();
+    }, 40_000);
 
-    genai.live.music.connect({
-      model: "models/lyria-realtime-exp",
-      callbacks: {
-        onmessage: async (msg) => {
-          if (msg.setupComplete) {
-            try {
-              await session.setWeightedPrompts({
-                weightedPrompts: [{ text: musicPrompt, weight: 1.0 }],
-              });
-              session.play();
-            } catch (e) {
-              console.error("[LYRIA] setWeightedPrompts failed:", e);
-              clearTimeout(timer); finish();
-            }
-          }
-          for (const chunk of msg.serverContent?.audioChunks ?? []) {
-            if (chunk.data && !finished) {
-              const buf = Buffer.from(chunk.data, "base64");
-              chunks.push(buf);
-              totalBytes += buf.length;
-              if (totalBytes >= targetBytes) { clearTimeout(timer); finish(); }
-            }
-          }
-        },
-        onerror: (e) => { console.error("[LYRIA] ws error:", e); clearTimeout(timer); finish(); },
-        onclose: () => { clearTimeout(timer); finish(); },
+    const ws = new WebSocket(WS_URL, {
+      headers: {
+        "content-type": "application/json",
+        "user-agent": "google-genai-sdk/1.43.0 gl-node/v23.7.0",
       },
-    }).then((s) => { session = s; }).catch((e) => {
-      console.error("[LYRIA] connect failed:", e);
-      clearTimeout(timer); resolve(null);
     });
+
+    ws.on("open", () => {
+      ws.send(JSON.stringify({ setup: { model: "models/lyria-realtime-exp" } }));
+    });
+
+    ws.on("message", (raw: Buffer | string) => {
+      let msg: Record<string, unknown>;
+      try { msg = JSON.parse(raw.toString()) as Record<string, unknown>; }
+      catch { return; }
+
+      if (msg.setupComplete !== undefined) {
+        ws.send(JSON.stringify({ clientContent: { weightedPrompts: [{ text: musicPrompt, weight: 1.0 }] } }));
+        ws.send(JSON.stringify({ playbackControl: "PLAY" }));
+      }
+
+      const audioChunks = (msg as { serverContent?: { audioChunks?: { data?: string }[] } })
+        .serverContent?.audioChunks ?? [];
+      for (const chunk of audioChunks) {
+        if (chunk.data && !finished) {
+          const buf = Buffer.from(chunk.data, "base64");
+          chunks.push(buf);
+          totalBytes += buf.length;
+          if (totalBytes >= targetBytes) { clearTimeout(timer); finish(); }
+        }
+      }
+    });
+
+    ws.on("error", (e: Error) => { console.error("[LYRIA] ws error:", e.message); clearTimeout(timer); finish(); });
+    ws.on("close", () => { clearTimeout(timer); finish(); });
   });
 }
 
@@ -157,26 +168,25 @@ export async function POST(req: NextRequest) {
     const elClient = new ElevenLabsClient({ apiKey: elKey });
 
     // ── Step 1: Parse screenplay or prose + fetch ElevenLabs voices in parallel ──────
-    const parsePrompt = `You are a script and prose parser. Parse the following text into scenes and dialogue lines. The input may be a formatted screenplay OR prose narrative — handle both.
+    const parsePrompt = `You are a script and storyboard parser. Split the text into VISUAL SCENES for a storyboard — each scene gets its own illustrated panel. Aim for 4–8 scenes minimum; longer scripts should have more.
 
-SCREENPLAY FORMAT (has INT./EXT. headings and ALL-CAPS character names):
-- Lines starting with INT., EXT., I., E., or I/E. → scene headings
-- ALL-CAPS standalone line (not a heading) → character name; following indented lines → dialogue
-- Text between headings that is not a character name or dialogue → action text for that scene
-- Parenthetical line in () between character name and dialogue → optional parenthetical field
+SCREENPLAY FORMAT (has INT./EXT. headings):
+- Each INT./EXT. heading is a scene boundary.
+- ADDITIONALLY split a single INT./EXT. scene into sub-scenes when there is a significant visual change: a new camera direction (TIGHT ON, WIDE SHOT, CLOSE ON, POV, INSERT, SMASH CUT, CUT TO), a major action beat, a new character entering, or a dramatic tonal shift. Give each sub-scene a descriptive heading suffix (e.g. "INT. SERVER ROOM - DAY - HARRY ENTERS", "INT. SERVER ROOM - DAY - THE SCREEN REVEALS").
+- ALL-CAPS standalone line → character name; following indented lines → dialogue. Parenthetical in () → optional parenthetical.
+- Text between speaker blocks → action text for that scene.
 
-PROSE FORMAT (no INT./EXT. headings — narrative paragraphs with quoted dialogue):
-- Divide into scenes by logical setting changes, time jumps, or major paragraph breaks. If the whole passage is one location, it's one scene.
-- Give each scene a SHORT descriptive heading in screenplay style (e.g. "INT. SERVER ROOM - DAY", "EXT. STREET - NIGHT"). Infer location and time from the text.
-- Any text inside quotation marks (' ' or " ") spoken by a character is dialogue. Extract the quoted text only (no attribution phrase).
-- Identify the speaker from the surrounding attribution text (e.g. "said Harry", "the voice whispered"). Use a SHORT character name in ALL-CAPS (e.g. HARRY, VOICE, SORTING HAT). Use "UNKNOWN" only if truly unidentifiable.
-- All non-quoted text (description, attribution, action) is the scene's action text.
+PROSE FORMAT (narrative paragraphs, no INT./EXT. headings):
+- Create a new scene for each significant visual beat: new setting, new group of characters, camera-like focus shift, major story development, or emotional turn. Aim for one scene every 3–5 paragraphs for a rich storyboard.
+- Give each scene a SHORT descriptive heading in screenplay style: "INT. SERVER ROOM - CLOSE ON SORTING ALGORITHM SCREEN", "INT. SERVER ROOM - WIDE - ENGINEERS REACT", etc.
+- Quoted text (" " or ' ') spoken by an identified character → dialogue. Extract text only, no attribution.
+- Speaker from attribution text ("said Harry", "the voice"). ALL-CAPS short name (HARRY, TECH LEAD, SORTING ALGORITHM). UNKNOWN only if truly unclear.
+- Non-quoted text → action for that scene.
 
 ALWAYS:
-- Assign each scene a sequential index starting at 0.
-- Assign each dialogue line a global lineIndex starting at 0 (incrementing across all scenes in order).
-- Return ONLY a valid JSON object with no markdown fences, no explanation:
-{"scenes":[{"index":0,"heading":"INT. SERVER ROOM - DAY","action":"Description text here."}],"dialogueLines":[{"sceneIndex":0,"lineIndex":0,"character":"HARRY","parenthetical":"quietly","text":"Not the Legacy Codebase."}]}
+- Sequential scene index starting at 0. Global lineIndex for dialogueLines starting at 0 across all scenes.
+- Return ONLY valid JSON, no markdown, no explanation:
+{"scenes":[{"index":0,"heading":"INT. SERVER ROOM - DAY","action":"Action text."}],"dialogueLines":[{"sceneIndex":0,"lineIndex":0,"character":"HARRY","parenthetical":"quietly","text":"Not the Legacy Codebase."}]}
 
 Text:
 ${text}`;
@@ -499,7 +509,7 @@ ${scenes.map(s => `${s.index}: "${s.heading}" — ${s.action.slice(0, 180)}`).jo
         const nextStart = sceneIndex + 1 < sceneStartTimes.length ? sceneStartTimes[sceneIndex + 1] : cursor;
         const duration = Math.max(6, Math.min(nextStart - startTime + 2, 25));
         console.log(`[LYRIA] scene ${sceneIndex} | prompt: "${prompt}" | duration: ${duration.toFixed(1)}s`);
-        const audioBase64 = await generateLyriaMusic(genai, prompt, duration);
+        const audioBase64 = await generateLyriaMusic(geminiKey, prompt, duration);
         if (!audioBase64) throw new Error("no audio returned");
         return { sceneIndex, prompt, startTime, audioBase64 } satisfies MusicItem;
       }));
