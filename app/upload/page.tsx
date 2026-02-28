@@ -335,7 +335,8 @@ export default function UploadPage() {
       e.preventDefault();
       const audio = audioRef.current;
       if (!audio) return;
-      audio.paused ? audio.play() : audio.pause();
+      if (audio.paused) void audio.play();
+      else audio.pause();
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
@@ -522,80 +523,97 @@ export default function UploadPage() {
         </div>
       </header>
 
-      {/* ── HERO FRAME ──────────────────────────────────────────────────────── */}
+      {/* ── HERO FRAME + LEFT NOTES ────────────────────────────────────────── */}
       {result && (
-        <section className="w-full bg-black shrink-0 flex justify-center">
-          <div className="relative" style={{ lineHeight: 0 }}>
-            {currentFrame ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                key={currentScene}
-                src={`data:${currentFrame.mimeType};base64,${currentFrame.imageBase64}`}
-                alt={currentSceneData?.heading ?? ""}
-                className="block max-h-[62vh] w-auto max-w-full"
-                style={{ animation: "sceneFadeIn 0.5s ease-out" }}
-              />
-            ) : (
-              <div
-                className="flex items-center justify-center bg-zinc-900"
-                style={{ width: "min(80vw, 62vh * 16 / 9)", height: "min(62vh, 80vw * 9 / 16)" }}
-              >
-                <span className="text-zinc-600 font-mono text-sm">No image</span>
+        <section className="frame-section">
+          <div className="frame-layout">
+            <aside className="frame-notes">
+              <div className="frame-notes-block">
+                <h3>Scene tracker</h3>
+                <p>
+                  {formatTime(currentTime)} / {formatTime(totalDuration || 0)}
+                </p>
+                <div className="tracker-list">
+                  {result.scenes.map((scene, i) => (
+                    <button
+                      key={scene.index}
+                      type="button"
+                      className={`tracker-item ${i === currentScene ? "active" : ""}`}
+                      onClick={() => seekToScene(i)}
+                    >
+                      <span>Scene {i + 1}</span>
+                      <strong>{scene.heading}</strong>
+                    </button>
+                  ))}
+                </div>
               </div>
-            )}
 
-            {/* Scene heading — top-left */}
-            {currentSceneData?.heading && (
-              <div className="absolute top-4 left-4 font-mono text-xs text-white/80 bg-black/70 px-3 py-1.5 rounded backdrop-blur-sm tracking-widest uppercase">
-                {currentSceneData.heading}
+              <div className="frame-notes-block">
+                <h3>Speaker notes</h3>
+                <p>Drag/scroll to preview upcoming lines.</p>
+                <div className="speaker-notes-scroll">
+                  {result.dialogueLines.map((line) => {
+                    const style = speakerStyleMap[line.character] ?? SPEAKER_STYLES[0];
+                    const tone = toneMap[line.lineIndex];
+                    const active = line.sceneIndex === currentScene;
+                    return (
+                      <article
+                        key={line.lineIndex}
+                        className={`speaker-note-row ${style.panelClass} ${active ? "active" : ""}`}
+                      >
+                        <div className="dialogue-head">
+                          <span className="speaker-tag">{line.character}</span>
+                          {tone && <span className="tone-tag">{tone.emotion}</span>}
+                        </div>
+                        <p>{line.text}</p>
+                      </article>
+                    );
+                  })}
+                </div>
               </div>
-            )}
+            </aside>
 
-            {/* Ambiance music indicator — top-right */}
-            {currentSceneMusic && (
-              <div className="absolute top-4 right-4 flex items-center gap-1.5 bg-black/70 backdrop-blur-sm px-2.5 py-1.5 rounded">
-                <span className="text-violet-400 text-[11px]">♪</span>
-                <span className="font-mono text-[10px] text-violet-300/80 tracking-wide max-w-[160px] truncate">
-                  {currentSceneMusic.prompt}
-                </span>
+            <div className="frame-main">
+              <div className="frame-stage-header">
+                <span>{currentSceneData?.heading ?? "Current scene"}</span>
+                {currentSceneMusic && <em>Music: {currentSceneMusic.prompt}</em>}
               </div>
-            )}
-
-            {/* SRT stamp — bottom-center */}
-            <div className="absolute bottom-5 left-1/2 -translate-x-1/2 text-center">
-              <div className="font-mono text-xs text-white/40 tracking-widest mb-0.5">
-                SRT {currentScene + 1}
+              {currentFrame ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  key={currentScene}
+                  src={`data:${currentFrame.mimeType};base64,${currentFrame.imageBase64}`}
+                  alt={currentSceneData?.heading ?? ""}
+                  className="frame-image-main"
+                  style={{ animation: "sceneFadeIn 0.5s ease-out" }}
+                />
+              ) : (
+                <div className="frame-empty">
+                  <span>No image</span>
+                </div>
+              )}
+              <div className="frame-srt">
+                SRT {currentScene + 1}: {toSRT(sceneStartTimes[currentScene] ?? 0)} → {toSRT(sceneEndTime(currentScene))}
               </div>
-              <div className="font-mono text-sm text-white bg-black/80 px-4 py-1.5 rounded-sm backdrop-blur-sm tracking-wider leading-none">
-                {toSRT(sceneStartTimes[currentScene] ?? 0)} → {toSRT(sceneEndTime(currentScene))}
-              </div>
-            </div>
-
-            {/* Active dialogue lines — bottom strip */}
-            {(() => {
-              const lines = linesByScene[currentScene] ?? [];
-              if (!lines.length) return null;
-              return (
-                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 to-transparent px-6 py-4 pt-10">
-                  <div className="flex flex-wrap gap-x-4 gap-y-1">
+              {(() => {
+                const lines = linesByScene[currentScene] ?? [];
+                if (!lines.length) return null;
+                return (
+                  <div className="frame-line-preview">
                     {lines.slice(0, 3).map((line) => {
                       const color = speakerColorMap[line.character] ?? SPEAKER_COLORS[0];
                       return (
-                        <div key={line.lineIndex} className="text-xs leading-snug">
-                          <span className={`font-bold uppercase tracking-widest ${color}`}>{line.character} </span>
-                          <span className="text-zinc-300 italic">
-                            &ldquo;{line.text.slice(0, 60)}{line.text.length > 60 ? "…" : ""}&rdquo;
-                          </span>
-                        </div>
+                        <p key={line.lineIndex}>
+                          <span className={color}>{line.character}: </span>
+                          {line.text.slice(0, 90)}
+                          {line.text.length > 90 ? "…" : ""}
+                        </p>
                       );
                     })}
-                    {lines.length > 3 && (
-                      <span className="text-zinc-500 text-xs">+{lines.length - 3} more</span>
-                    )}
                   </div>
-                </div>
-              );
-            })()}
+                );
+              })()}
+            </div>
           </div>
         </section>
       )}
