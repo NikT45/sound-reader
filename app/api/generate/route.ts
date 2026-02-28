@@ -214,7 +214,7 @@ ${text}`;
 
     const [parseResult, voicesResult] = await Promise.all([
       genai.models.generateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-3-flash-preview",
         contents: [{ role: "user", parts: [{ text: parsePrompt }] }],
       }),
       elClient.voices.getAll(),
@@ -266,7 +266,7 @@ ${text.slice(0, 1500)}`;
     let castingRaw: Record<string, string> = {};
     try {
       const castResult = await genai.models.generateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-3-flash-preview",
         contents: [{ role: "user", parts: [{ text: castingPrompt }] }],
       });
       const castJson = (castResult.text ?? "").replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
@@ -316,7 +316,7 @@ ${text.slice(0, 1500)}`;
     // ── Step 3: Three parallel Gemini calls ──────────────────────────────────
 
     // a. Storyboard image generation — one per scene, concurrency-limited to avoid rate limits
-    const IMAGE_MODEL = "gemini-2.5-flash-image";
+    const IMAGE_MODEL = "gemini-3-pro-image-preview";
     const imageTasks = scenes.map((scene) => async (): Promise<StoryboardFrame | null> => {
       const prompt =
         `Film storyboard panel. Hand-drawn rough black marker sketch on white paper. ` +
@@ -426,9 +426,9 @@ ${scenes.map(s => `${s.index}: "${s.heading}" — ${s.action.slice(0, 180)}`).jo
 
     const [imageResults, sfxRawResult, toneRawResult, ambianceRawResult] = await Promise.allSettled([
       runWithConcurrency(imageTasks, 3),
-      genai.models.generateContent({ model: "gemini-2.5-flash", contents: [{ role: "user", parts: [{ text: sfxGeminiPrompt }] }] }),
-      genai.models.generateContent({ model: "gemini-2.5-flash", contents: [{ role: "user", parts: [{ text: toneGeminiPrompt }] }] }),
-      genai.models.generateContent({ model: "gemini-2.5-flash", contents: [{ role: "user", parts: [{ text: ambianceGeminiPrompt }] }] }),
+      genai.models.generateContent({ model: "gemini-3-flash-preview", contents: [{ role: "user", parts: [{ text: sfxGeminiPrompt }] }] }),
+      genai.models.generateContent({ model: "gemini-3-flash-preview", contents: [{ role: "user", parts: [{ text: toneGeminiPrompt }] }] }),
+      genai.models.generateContent({ model: "gemini-3-flash-preview", contents: [{ role: "user", parts: [{ text: ambianceGeminiPrompt }] }] }),
     ]);
 
     const storyboardFrames: StoryboardFrame[] = imageResults.status === "fulfilled"
