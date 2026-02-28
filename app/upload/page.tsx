@@ -176,13 +176,23 @@ async function decodeB64Audio(b64: string): Promise<AudioBuffer> {
   return buf;
 }
 
-async function mixAudio(
+interface DecodedAudio {
+  lineBuffers: AudioBuffer[];
+  startTimes: number[];
+  sfxDecoded: { buffer: AudioBuffer; startTime: number; peak: number }[];
+  musicDecoded: { buffer: AudioBuffer; startTime: number }[];
+  sampleRate: number;
+  numChannels: number;
+  totalDuration: number;
+}
+
+async function decodeAllAudio(
   linesAudio: string[],
   dialogueLines: ScriptDialogueLine[],
   sfxList: SfxItem[],
   musicList: MusicItem[],
   sceneStartTimes: number[],
-): Promise<string> {
+): Promise<DecodedAudio> {
   const lineBuffers: AudioBuffer[] = [];
   for (const b64 of linesAudio) {
     try {
@@ -205,11 +215,19 @@ async function mixAudio(
     cursor += lineBuffers[i]?.duration ?? 0;
   }
 
-  const sfxDecoded: { buffer: AudioBuffer; startTime: number }[] = [];
+  const sfxDecoded: { buffer: AudioBuffer; startTime: number; peak: number }[] = [];
   for (const sfx of sfxList) {
     try {
       const buf = await decodeB64Audio(sfx.audioBase64);
-      sfxDecoded.push({ buffer: buf, startTime: sceneStartTimes[sfx.sceneIndex] ?? sfx.startTime });
+      let peak = 0;
+      for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+        const data = buf.getChannelData(ch);
+        for (let s = 0; s < data.length; s++) {
+          const abs = Math.abs(data[s]);
+          if (abs > peak) peak = abs;
+        }
+      }
+      sfxDecoded.push({ buffer: buf, startTime: sceneStartTimes[sfx.sceneIndex] ?? sfx.startTime, peak });
     } catch { /* skip */ }
   }
 
@@ -229,6 +247,17 @@ async function mixAudio(
     musicDecoded.reduce((m, { buffer, startTime }) => Math.max(m, startTime + buffer.duration), 0),
   );
 
+  return { lineBuffers, startTimes, sfxDecoded, musicDecoded, sampleRate, numChannels, totalDuration };
+}
+
+async function renderMix(
+  decoded: DecodedAudio,
+  voiceGain: number,
+  sfxGain: number,
+  musicGain: number,
+): Promise<string> {
+  const { lineBuffers, startTimes, sfxDecoded, musicDecoded, sampleRate, numChannels, totalDuration } = decoded;
+
   const offCtx = new OfflineAudioContext(
     numChannels,
     Math.max(1, Math.ceil(totalDuration * sampleRate)),
@@ -238,24 +267,19 @@ async function mixAudio(
   for (let i = 0; i < lineBuffers.length; i++) {
     const src = offCtx.createBufferSource();
     src.buffer = lineBuffers[i];
-    src.connect(offCtx.destination);
+    const gain = offCtx.createGain();
+    gain.gain.value = voiceGain;
+    src.connect(gain);
+    gain.connect(offCtx.destination);
     src.start(startTimes[i]);
   }
 
   const TARGET_PEAK = 0.6;
-  for (const { buffer, startTime } of sfxDecoded) {
-    let peak = 0;
-    for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
-      const data = buffer.getChannelData(ch);
-      for (let s = 0; s < data.length; s++) {
-        const abs = Math.abs(data[s]);
-        if (abs > peak) peak = abs;
-      }
-    }
+  for (const { buffer, startTime, peak } of sfxDecoded) {
     const src = offCtx.createBufferSource();
     src.buffer = buffer;
     const gain = offCtx.createGain();
-    gain.gain.value = peak > 0 ? TARGET_PEAK / peak : TARGET_PEAK;
+    gain.gain.value = (peak > 0 ? TARGET_PEAK / peak : TARGET_PEAK) * sfxGain;
     src.connect(gain);
     gain.connect(offCtx.destination);
     src.start(startTime);
@@ -265,7 +289,7 @@ async function mixAudio(
     const src = offCtx.createBufferSource();
     src.buffer = buffer;
     const gain = offCtx.createGain();
-    gain.gain.value = 0.18;
+    gain.gain.value = 0.18 * musicGain;
     src.connect(gain);
     gain.connect(offCtx.destination);
     src.start(startTime);
@@ -289,11 +313,18 @@ export default function UploadPage() {
   const [currentTime, setCurrentTime] = useState(0);
   const [totalDuration, setTotalDuration] = useState(0);
 
+  // Gain mixer
+  const [voiceGain, setVoiceGain] = useState(1.0);
+  const [sfxGain, setSfxGain]     = useState(1.0);
+  const [musicGain, setMusicGain] = useState(1.0);
+  const [isMixing, setIsMixing]   = useState(false);
+
   const prevAudioUrl = useRef<string | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const isDragging = useRef(false);
   const timelineRef = useRef<HTMLDivElement>(null);
   const cardRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const decodedRef = useRef<DecodedAudio | null>(null);
 
   // ── Audio event listeners ───────────────────────────────────────────────────
   useEffect(() => {
@@ -325,6 +356,33 @@ export default function UploadPage() {
       audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
     };
   }, [audioUrl, result]);
+
+  // ── Debounced remix on gain change ──────────────────────────────────────────
+  useEffect(() => {
+    if (!decodedRef.current) return;
+    const timeout = setTimeout(async () => {
+      setIsMixing(true);
+      try {
+        const savedTime = audioRef.current?.currentTime ?? 0;
+        const url = await renderMix(decodedRef.current!, voiceGain, sfxGain, musicGain);
+        if (prevAudioUrl.current) URL.revokeObjectURL(prevAudioUrl.current);
+        prevAudioUrl.current = url;
+        setAudioUrl(url);
+        // Restore position after new src loads
+        const restoreTime = () => {
+          if (audioRef.current) {
+            audioRef.current.currentTime = savedTime;
+            audioRef.current.removeEventListener("loadedmetadata", restoreTime);
+          }
+        };
+        audioRef.current?.addEventListener("loadedmetadata", restoreTime);
+      } finally {
+        setIsMixing(false);
+      }
+    }, 350);
+    return () => clearTimeout(timeout);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voiceGain, sfxGain, musicGain]);
 
   // ── Space bar play/pause ────────────────────────────────────────────────────
   useEffect(() => {
@@ -401,13 +459,15 @@ export default function UploadPage() {
       }
 
       setStatus("Mixing dialogue, SFX, and soundtrack...");
-      const url = await mixAudio(
+      const decoded = await decodeAllAudio(
         data.linesAudio,
         data.dialogueLines,
         data.sfxList ?? [],
         data.musicList ?? [],
         data.sceneStartTimes ?? [],
       );
+      decodedRef.current = decoded;
+      const url = await renderMix(decoded, voiceGain, sfxGain, musicGain);
 
       prevAudioUrl.current = url;
       setAudioUrl(url);
@@ -692,6 +752,31 @@ export default function UploadPage() {
             )}
           </div>
 
+          {/* Gain mixer */}
+          <div className="flex items-center gap-4 px-1 pt-1">
+            {([
+              { label: "Speaking", value: voiceGain, set: setVoiceGain, color: "text-amber-400" },
+              { label: "SFX",      value: sfxGain,   set: setSfxGain,   color: "text-cyan-400"  },
+              { label: "Music",    value: musicGain,  set: setMusicGain, color: "text-violet-400"},
+            ] as const).map(({ label, value, set, color }) => (
+              <div key={label} className="flex-1 flex flex-col gap-1.5">
+                <div className="flex justify-between items-baseline">
+                  <span className={`font-mono text-[10px] tracking-widest uppercase ${color}`}>{label}</span>
+                  <span className="font-mono text-[10px] text-zinc-500">{value.toFixed(2)}×</span>
+                </div>
+                <input
+                  type="range" min="0" max="2" step="0.01"
+                  value={value}
+                  onChange={(e) => set(parseFloat(e.target.value))}
+                  className="w-full h-1 rounded-full appearance-none bg-zinc-700 cursor-pointer accent-amber-400"
+                />
+              </div>
+            ))}
+            {isMixing && (
+              <span className="font-mono text-[10px] text-zinc-500 shrink-0 self-end pb-0.5">Mixing…</span>
+            )}
+          </div>
+
           {/* Audio player */}
           <audio ref={audioRef} controls src={audioUrl} className="w-full rounded-lg" />
         </section>
@@ -703,10 +788,10 @@ export default function UploadPage() {
 
           {/* Studio / input card */}
           <section className="studio-card">
-            <p className="eyebrow">Upload page</p>
-            <h1 className="upload-title">Upload script and generate audio.</h1>
+            <p className="eyebrow">Script studio</p>
+            <h1 className="upload-title">Upload your script. Generate a storyboard.</h1>
             <p className="upload-lead">
-              Pick text input or PDF upload, then click one button to generate your immersive script audio.
+              Paste your screenplay or drop a PDF and watch it transform into a full storyboard — AI-generated visuals, cast voices, SFX, and soundtrack.
             </p>
 
             <div className="mode-switch" role="tablist" aria-label="Input mode">
