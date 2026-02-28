@@ -168,25 +168,33 @@ export async function POST(req: NextRequest) {
     const elClient = new ElevenLabsClient({ apiKey: elKey });
 
     // ── Step 1: Parse screenplay or prose + fetch ElevenLabs voices in parallel ──────
-    const parsePrompt = `You are a script and storyboard parser. Split the text into VISUAL SCENES for a storyboard — each scene gets its own illustrated panel. Aim for 4–8 scenes minimum; longer scripts should have more.
+    const parsePrompt = `You are a script parser for cinematic audio. Your job is to convert ALL text into a spoken audio experience — nothing is skipped. Every word must appear somewhere in dialogueLines.
 
-SCREENPLAY FORMAT (has INT./EXT. headings):
-- Each INT./EXT. heading is a scene boundary.
-- ADDITIONALLY split a single INT./EXT. scene into sub-scenes when there is a significant visual change: a new camera direction (TIGHT ON, WIDE SHOT, CLOSE ON, POV, INSERT, SMASH CUT, CUT TO), a major action beat, a new character entering, or a dramatic tonal shift. Give each sub-scene a descriptive heading suffix (e.g. "INT. SERVER ROOM - DAY - HARRY ENTERS", "INT. SERVER ROOM - DAY - THE SCREEN REVEALS").
-- ALL-CAPS standalone line → character name; following indented lines → dialogue. Parenthetical in () → optional parenthetical.
-- Text between speaker blocks → action text for that scene.
+━━━ SCENES ━━━
+Split into VISUAL SCENES for a storyboard. Aim for 4–8+ scenes.
+- SCREENPLAY: each INT./EXT. heading is a boundary; also split within a location at major visual beats (camera directions like TIGHT ON, SMASH CUT, CUT TO, new character entrance, dramatic tonal shift).
+- PROSE: create a new scene every 3–5 paragraphs or at each major visual beat. Give each a descriptive screenplay-style heading (e.g. "INT. SERVER ROOM - WIDE - ENGINEERS REACT").
+- Each scene's "action" field: a SHORT summary of the setting/action for image generation only (1–2 sentences max). Do NOT put narration text here — it goes in dialogueLines.
 
-PROSE FORMAT (narrative paragraphs, no INT./EXT. headings):
-- Create a new scene for each significant visual beat: new setting, new group of characters, camera-like focus shift, major story development, or emotional turn. Aim for one scene every 3–5 paragraphs for a rich storyboard.
-- Give each scene a SHORT descriptive heading in screenplay style: "INT. SERVER ROOM - CLOSE ON SORTING ALGORITHM SCREEN", "INT. SERVER ROOM - WIDE - ENGINEERS REACT", etc.
-- Quoted text (" " or ' ') spoken by an identified character → dialogue. Extract text only, no attribution.
-- Speaker from attribution text ("said Harry", "the voice"). ALL-CAPS short name (HARRY, TECH LEAD, SORTING ALGORITHM). UNKNOWN only if truly unclear.
-- Non-quoted text → action for that scene.
+━━━ DIALOGUE LINES ━━━
+Include EVERY piece of text in dialogueLines, in the ORDER it appears in the source:
+- Narration, description, action, attribution, stage directions → character: "narrator"
+- Character speech → character: ALL-CAPS name (e.g. "HARRY", "SORTING ALGORITHM", "ENGINEER 1")
 
-ALWAYS:
-- Sequential scene index starting at 0. Global lineIndex for dialogueLines starting at 0 across all scenes.
-- Return ONLY valid JSON, no markdown, no explanation:
-{"scenes":[{"index":0,"heading":"INT. SERVER ROOM - DAY","action":"Action text."}],"dialogueLines":[{"sceneIndex":0,"lineIndex":0,"character":"HARRY","parenthetical":"quietly","text":"Not the Legacy Codebase."}]}
+PROSE rules:
+- Non-quoted text (including attribution like "said Harry", "he thought") → narrator line.
+- Text inside quotation marks (" " or ' ') → spoken by the identified character.
+- Split long narrator passages at natural sentence or paragraph breaks — each chunk is a separate narrator line (keep each under ~40 words for natural pacing).
+
+SCREENPLAY rules:
+- Action block text → narrator line(s) before that scene's character dialogue. Split long blocks into multiple narrator lines at paragraph breaks.
+- Parenthetical in () between character name and speech → parenthetical field (optional).
+- ALL-CAPS standalone line → character name for the following dialogue.
+
+ORDERING: dialogueLines must be in strict top-to-bottom source order. narrator lines appear between character lines exactly where the text places them. lineIndex is globally sequential starting at 0.
+
+Return ONLY valid JSON, no markdown, no explanation:
+{"scenes":[{"index":0,"heading":"INT. SERVER ROOM - DAY","action":"Brief visual summary."}],"dialogueLines":[{"sceneIndex":0,"lineIndex":0,"character":"narrator","text":"As Harry stepped forward, the room went quiet."},{"sceneIndex":0,"lineIndex":1,"character":"ENGINEER 1","text":"Potter, did she say?"}]}
 
 Text:
 ${text}`;
@@ -222,7 +230,7 @@ ${text}`;
       return `${v.name} (${v.voice_id}): ${desc || "no description"}`;
     }).join("\n");
 
-    const characters = [...new Set(dialogueLines.map(l => l.character))];
+    const characters = [...new Set(dialogueLines.map(l => l.character).filter(c => c !== "narrator"))];
 
     const castingPrompt = `You are a casting director for a cinematic audio experience. Assign the most fitting ElevenLabs voice to each role based on the character's implied age, gender, accent, and personality from the screenplay.
 
@@ -444,17 +452,21 @@ ${scenes.map(s => `${s.index}: "${s.heading}" — ${s.action.slice(0, 180)}`).jo
     for (const t of dialogueTones) toneMap[t.lineIndex] = t;
 
     // ── Step 4: TTS per dialogue line (sequential) ───────────────────────────
+    const defaultNarratorSettings = { stability: 0.65, similarity_boost: 0.8, style: 0.1 };
     const defaultDialogueSettings = { stability: 0.35, similarity_boost: 0.8, style: 0.6 };
     const linesAudio: string[] = [];
     const lineDurations: number[] = [];
 
     for (let i = 0; i < dialogueLines.length; i++) {
       const line = dialogueLines[i];
+      const isNarrator = line.character === "narrator";
       const assignment = voiceMap[line.character] ?? voiceMap["narrator"];
       const tone = toneMap[i];
-      const settings = tone
-        ? { stability: tone.stability, similarity_boost: 0.8, style: tone.style }
-        : defaultDialogueSettings;
+      const settings = isNarrator
+        ? defaultNarratorSettings
+        : tone
+          ? { stability: tone.stability, similarity_boost: 0.8, style: tone.style }
+          : defaultDialogueSettings;
 
       const toneLabel = tone ? ` [${tone.emotion}]` : "";
       console.log(`[TTS] line ${i} (${line.character}${toneLabel}) → voice "${assignment.voiceName}" | stability: ${settings.stability} style: ${settings.style} | text: "${line.text.slice(0, 80)}${line.text.length > 80 ? "…" : ""}"`);
