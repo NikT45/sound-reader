@@ -136,9 +136,20 @@ async function mixAudio(segmentsAudio: string[], segments: Segment[], sfxList: S
     src.start(startTimes[i]);
   }
 
+  const TARGET_PEAK = 0.6;
   for (const { buffer, startTime } of sfxDecoded) {
+    // Find peak amplitude across all channels
+    let peak = 0;
+    for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+      const data = buffer.getChannelData(ch);
+      for (let s = 0; s < data.length; s++) {
+        const abs = Math.abs(data[s]);
+        if (abs > peak) peak = abs;
+      }
+    }
     const src = offCtx.createBufferSource(); src.buffer = buffer;
-    const gain = offCtx.createGain(); gain.gain.value = 0.6;
+    const gain = offCtx.createGain();
+    gain.gain.value = peak > 0 ? TARGET_PEAK / peak : TARGET_PEAK;
     src.connect(gain); gain.connect(offCtx.destination); src.start(startTime);
   }
 
